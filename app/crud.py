@@ -34,7 +34,7 @@ async def _fetch_and_store_card_definition_from_scryfall(db: AsyncSession, scryf
                 image_uri_large=image_uris.get("large"),
                 image_uri_art_crop=image_uris.get("art_crop"),
                 image_uri_border_crop=image_uris.get("border_crop"),
-                # type_line=scryfall_data.get("type_line"), # Ensure this is in your CardDefinitionCreate if you uncomment
+                type_line=scryfall_data.get("type_line"),
             )
             
             if not card_def_create_data.scryfall_id or not card_def_create_data.name:

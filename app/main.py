@@ -1,8 +1,10 @@
 # app/main.py
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Request # Import Query and Request
+from fastapi.middleware.cors import CORSMiddleware # Import CORSMiddleware
+from fastapi.responses import Response # Added for serving image data
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional  # <-- Make sure this is present
+from typing import List, Optional
 from datetime import timedelta
 
 from . import models, schemas, crud, security # Import security
@@ -10,6 +12,7 @@ from .database import engine, get_db
 from .core.config import settings
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+from enum import Enum # Added for StoredImageSize
 
 async def create_db_and_tables():
     async with engine.begin() as conn:
@@ -21,7 +24,28 @@ app = FastAPI(
     title="MTG Collection Tracker API",
     description="API for managing a Magic: The Gathering card collection.",
     version="0.1.0",
-    on_startup=[create_db_and_tables]
+    on_startup=[create_db_and_tables],
+)
+
+# --- CORS Middleware ---
+# Origins that are allowed to make requests to this API.
+# You should update this list with the actual origin of your frontend application.
+# For example, if your frontend runs on http://localhost:3000, add that.
+# Using ["*"] allows all origins, which is okay for development but might be too permissive for production.
+origins = [
+    "http://localhost",         # If frontend is served from root localhost
+    "http://localhost:3000",    # Common port for React dev servers
+    "http://localhost:5173",    # Common port for Vite dev servers
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # List of origins that are allowed to make requests
+    allow_credentials=True,      # Allow cookies to be included in requests
+    allow_methods=["*"],         # Allow all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],         # Allow all headers
 )
 
 # --- Helper Dependency for Current User ---
@@ -93,6 +117,7 @@ async def create_new_card_definition(
 
 @app.get("/card-definitions/", response_model=List[schemas.CardDefinition])
 async def read_card_definitions_list(
+    request: Request, # Inject Request
     skip: int = 0,
     limit: int = 100,
     name: Optional[str] = None,
@@ -109,63 +134,212 @@ async def read_card_definitions_list(
     card_defs = await crud.get_card_definitions(
         db=db, skip=skip, limit=limit, name=name, type_line=type_line, set_code=set_code
     )
-    return card_defs
+    
+    response_cards: List[schemas.CardDefinition] = []
+    for db_card in card_defs: # Iterate over the correct variable 'card_defs'
+        pydantic_card = schemas.CardDefinition.from_orm(db_card)
+        if db_card.image_data_small:
+            pydantic_card.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='small'))
+        if db_card.image_data_normal:
+            pydantic_card.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='normal'))
+        if db_card.image_data_large:
+            pydantic_card.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='large'))
+        response_cards.append(pydantic_card)
+    return response_cards
 
 @app.get("/card-definitions/{card_def_id}", response_model=schemas.CardDefinition)
-async def read_card_definition(card_def_id: int, db: AsyncSession = Depends(get_db)):
+async def read_card_definition(
+    card_def_id: int,
+    request: Request, # Inject Request
+    db: AsyncSession = Depends(get_db)
+):
     db_card_def = await crud.get_card_definition(db=db, card_definition_id=card_def_id)
     if db_card_def is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Card Definition not found")
-    return db_card_def
+    
+    pydantic_card = schemas.CardDefinition.from_orm(db_card_def)
+    if db_card_def.image_data_small:
+        pydantic_card.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+    if db_card_def.image_data_normal:
+        pydantic_card.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+    if db_card_def.image_data_large:
+        pydantic_card.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+    return pydantic_card
+
+# --- Card Search Endpoint (as requested by frontend) ---
+@app.get("/cards/search", response_model=List[schemas.CardDefinition])
+async def search_card_definitions_by_name(
+    request: Request, # Inject Request
+    name: str = Query(..., min_length=1, description="Card name to search for"),
+    skip: int = 0,
+    limit: int = 20, # Default limit for search results
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Search for Magic: The Gathering card definitions by name.
+    This endpoint is specifically for the frontend's /cards/search path.
+    """
+    # Uses the existing crud.get_card_definitions function
+    card_defs_models = await crud.get_card_definitions(
+        db=db, skip=skip, limit=limit, name=name
+        # You can add other parameters like type_line, set_code if the frontend sends them
+    )
+    # Standard practice is to return an empty list if no results are found,
+    # rather than a 404, as the endpoint itself was found and processed the query.
+    response_cards: List[schemas.CardDefinition] = []
+    for db_card in card_defs_models:
+        pydantic_card = schemas.CardDefinition.from_orm(db_card)
+        if db_card.image_data_small: # Check if image data exists before creating URL
+            pydantic_card.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='small'))
+        if db_card.image_data_normal:
+            pydantic_card.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='normal'))
+        if db_card.image_data_large:
+            pydantic_card.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card.scryfall_id, size='large'))
+        response_cards.append(pydantic_card)
+    return response_cards
+
+# --- Card Image Endpoint ---
+class StoredImageSize(str, Enum):
+    """
+    Represents the image sizes for which binary data is stored in the database
+    by the populate_cards.py script.
+    """
+    small = "small"
+    normal = "normal"
+    large = "large"
+
+@app.get(
+    "/cards/{scryfall_id}/image",
+    responses={
+        200: {
+            "content": {"image/jpeg": {}}, # Assuming images are JPEGs
+            "description": "The card image.",
+        },
+        404: {"description": "Card or image data not found"},
+        400: {"description": "Invalid image size requested"},
+    },
+    summary="Get Card Image Data",
+    description="Serves the stored binary image data for a card. "
+                "Currently supports 'small', 'normal', and 'large' sizes "
+                "and assumes JPEG format.",
+    tags=["Cards"], # Added a tag for better organization in API docs
+    name="get_card_image_data"  # <--- ADD THIS NAME
+)
+async def get_card_image_data(
+    scryfall_id: str,
+    size: StoredImageSize = Query(
+        StoredImageSize.normal, # Default size
+        description="The desired image size (small, normal, or large)."
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    card = await crud.get_card_definition_by_scryfall_id(db, scryfall_id=scryfall_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    image_data_column_name = f"image_data_{size.value}"
+    image_data: bytes | None = getattr(card, image_data_column_name, None)
+
+    if not image_data:
+        raise HTTPException(status_code=404, detail=f"Image data for size '{size.value}' not found for card {scryfall_id}.")
+
+    return Response(content=image_data, media_type="image/jpeg")
 
 # --- User Collection Endpoints ---
 @app.post("/collection/cards/", response_model=schemas.UserCollectionEntry, status_code=status.HTTP_201_CREATED)
 async def add_card_to_my_collection(
     entry_create: schemas.UserCollectionEntryCreate,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     """
     Add a card to the authenticated user's collection.
-    The backend will try to find an existing CardDefinition by scryfall_id,
-    or you'd extend this to fetch from Scryfall and create the CardDefinition if new.
     """
     try:
-        return await crud.add_card_to_collection(db=db, user_id=current_user.id, entry_create=entry_create)
+        db_entry = await crud.add_card_to_collection(db=db, user_id=current_user.id, entry_create=entry_create)
+        pydantic_entry = schemas.UserCollectionEntry.from_orm(db_entry)
+        if db_entry.card_definition:
+            db_card_def = db_entry.card_definition
+            if db_card_def.image_data_small:
+                pydantic_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+            if db_card_def.image_data_normal:
+                pydantic_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+            if db_card_def.image_data_large:
+                pydantic_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+        return pydantic_entry
     except ValueError as e: # Catch specific error from CRUD if CardDefinition not found
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 @app.get("/collection/cards/", response_model=List[schemas.UserCollectionEntry])
 async def read_my_collection(
-    skip: int = 0, limit: int = 100,
+    request: Request, # Inject Request
+    skip: int = 0, 
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
-    collection = await crud.get_user_collection(db=db, user_id=current_user.id, skip=skip, limit=limit)
-    return collection
+    db_collection_entries = await crud.get_user_collection(db=db, user_id=current_user.id, skip=skip, limit=limit)
+    
+    response_entries: List[schemas.UserCollectionEntry] = []
+    for db_entry in db_collection_entries:
+        pydantic_entry = schemas.UserCollectionEntry.from_orm(db_entry)
+        if db_entry.card_definition: # Ensure card_definition exists
+            db_card_def = db_entry.card_definition 
+            if db_card_def.image_data_small:
+                pydantic_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+            if db_card_def.image_data_normal:
+                pydantic_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+            if db_card_def.image_data_large:
+                pydantic_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+        response_entries.append(pydantic_entry)
+    return response_entries
 
 @app.get("/collection/cards/{collection_entry_id}", response_model=schemas.UserCollectionEntry)
 async def read_my_collection_entry(
     collection_entry_id: int,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     db_entry = await crud.get_collection_entry(db=db, user_id=current_user.id, collection_entry_id=collection_entry_id)
     if db_entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection entry not found")
-    return db_entry
+    
+    pydantic_entry = schemas.UserCollectionEntry.from_orm(db_entry)
+    if db_entry.card_definition:
+        db_card_def = db_entry.card_definition
+        if db_card_def.image_data_small:
+            pydantic_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+        if db_card_def.image_data_normal:
+            pydantic_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+        if db_card_def.image_data_large:
+            pydantic_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+    return pydantic_entry
 
 @app.put("/collection/cards/{collection_entry_id}", response_model=schemas.UserCollectionEntry)
 async def update_my_collection_entry(
     collection_entry_id: int,
     entry_update: schemas.UserCollectionEntryUpdate,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     db_entry = await crud.get_collection_entry(db=db, user_id=current_user.id, collection_entry_id=collection_entry_id)
     if db_entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection entry not found")
-    return await crud.update_collection_entry(db=db, db_collection_entry=db_entry, entry_update=entry_update)
+    updated_db_entry = await crud.update_collection_entry(db=db, db_collection_entry=db_entry, entry_update=entry_update)
+    
+    pydantic_entry = schemas.UserCollectionEntry.from_orm(updated_db_entry)
+    if updated_db_entry.card_definition:
+        db_card_def = updated_db_entry.card_definition
+        if db_card_def.image_data_small:
+            pydantic_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+        if db_card_def.image_data_normal:
+            pydantic_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+        if db_card_def.image_data_large:
+            pydantic_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+    return pydantic_entry
 
 @app.delete("/collection/cards/{collection_entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_my_collection_entry(
@@ -204,44 +378,77 @@ async def search_scryfall_cards(q: str, db: AsyncSession = Depends(get_db)): # A
 @app.post("/decks/", response_model=schemas.Deck, status_code=status.HTTP_201_CREATED)
 async def create_new_deck_for_user(
     deck_create: schemas.DeckCreate,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     """Create a new deck for the authenticated user."""
-    deck = await crud.create_deck(db=db, user_id=current_user.id, deck_create=deck_create)
-    # The created deck will be empty initially, cards are added via another endpoint.
-    # To return deck_entries, ensure your Deck schema and CRUD operation populate it.
-    # For now, it will return the deck without entries as per current Deck schema.
-    # If you want to return entries, you might need to adjust the Deck schema or how crud.create_deck works.
-    # The current Deck schema expects deck_entries: List[DeckEntry] = []
-    return deck
+    db_deck = await crud.create_deck(db=db, user_id=current_user.id, deck_create=deck_create)
+    # Even if deck_entries is empty, we convert to Pydantic schema
+    pydantic_deck = schemas.Deck.from_orm(db_deck)
+    # No need to iterate pydantic_deck.deck_entries here as it will be empty upon creation
+    return pydantic_deck
 
 @app.get("/decks/", response_model=List[schemas.Deck])
 async def read_user_decks(
-    skip: int = 0, limit: int = 100,
+    request: Request, # Inject Request
+    skip: int = 0, 
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     """Retrieve decks for the authenticated user."""
-    decks = await crud.get_user_decks(db=db, user_id=current_user.id, skip=skip, limit=limit)
-    return decks
+    db_decks = await crud.get_user_decks(db=db, user_id=current_user.id, skip=skip, limit=limit)
+    
+    response_decks: List[schemas.Deck] = []
+    for db_deck in db_decks:
+        pydantic_deck = schemas.Deck.from_orm(db_deck)
+        for pydantic_deck_entry in pydantic_deck.deck_entries:
+            # Find the corresponding SQLAlchemy model for the card_definition
+            # This assumes db_deck.deck_entries were loaded with their card_definitions by CRUD
+            original_db_deck_entry = next((de for de in db_deck.deck_entries if de.id == pydantic_deck_entry.id), None)
+            if original_db_deck_entry and original_db_deck_entry.card_definition:
+                db_card_def = original_db_deck_entry.card_definition
+                if db_card_def.image_data_small:
+                    pydantic_deck_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+                if db_card_def.image_data_normal:
+                    pydantic_deck_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+                if db_card_def.image_data_large:
+                    pydantic_deck_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+        response_decks.append(pydantic_deck)
+    return response_decks
 
 @app.get("/decks/{deck_id}", response_model=schemas.Deck)
 async def read_single_deck(
     deck_id: int,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
     """Retrieve a specific deck owned by the authenticated user."""
-    deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id)
-    if deck is None:
+    db_deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id)
+    if db_deck is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
-    return deck
+
+    pydantic_deck = schemas.Deck.from_orm(db_deck)
+    for pydantic_deck_entry in pydantic_deck.deck_entries:
+        # Find the corresponding SQLAlchemy model for the card_definition
+        original_db_deck_entry = next((de for de in db_deck.deck_entries if de.id == pydantic_deck_entry.id), None)
+        if original_db_deck_entry and original_db_deck_entry.card_definition:
+            db_card_def = original_db_deck_entry.card_definition
+            if db_card_def.image_data_small:
+                pydantic_deck_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+            if db_card_def.image_data_normal:
+                pydantic_deck_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+            if db_card_def.image_data_large:
+                pydantic_deck_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+    return pydantic_deck
 
 @app.put("/decks/{deck_id}", response_model=schemas.Deck)
 async def update_existing_deck(
     deck_id: int,
     deck_update: schemas.DeckUpdate,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
@@ -249,7 +456,20 @@ async def update_existing_deck(
     db_deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id) # Ensure user owns the deck
     if db_deck is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
-    return await crud.update_deck(db=db, db_deck=db_deck, deck_update=deck_update)
+    updated_db_deck = await crud.update_deck(db=db, db_deck=db_deck, deck_update=deck_update)
+
+    pydantic_deck = schemas.Deck.from_orm(updated_db_deck)
+    for pydantic_deck_entry in pydantic_deck.deck_entries:
+        original_db_deck_entry = next((de for de in updated_db_deck.deck_entries if de.id == pydantic_deck_entry.id), None)
+        if original_db_deck_entry and original_db_deck_entry.card_definition:
+            db_card_def = original_db_deck_entry.card_definition
+            if db_card_def.image_data_small:
+                pydantic_deck_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+            if db_card_def.image_data_normal:
+                pydantic_deck_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+            if db_card_def.image_data_large:
+                pydantic_deck_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+    return pydantic_deck
 
 @app.delete("/decks/{deck_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_existing_deck(
@@ -269,6 +489,7 @@ async def delete_existing_deck(
 async def add_card_to_specific_deck(
     deck_id: int,
     deck_entry_create: schemas.DeckEntryCreate,
+    request: Request, # Inject Request
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
@@ -278,7 +499,17 @@ async def add_card_to_specific_deck(
     if deck_model is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
     try:
-        return await crud.add_card_to_deck(db=db, deck_model=deck_model, deck_entry_create=deck_entry_create)
+        db_deck_entry = await crud.add_card_to_deck(db=db, deck_model=deck_model, deck_entry_create=deck_entry_create)
+        pydantic_deck_entry = schemas.DeckEntry.from_orm(db_deck_entry)
+        if db_deck_entry.card_definition:
+            db_card_def = db_deck_entry.card_definition
+            if db_card_def.image_data_small:
+                pydantic_deck_entry.card_definition.local_image_url_small = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='small'))
+            if db_card_def.image_data_normal:
+                pydantic_deck_entry.card_definition.local_image_url_normal = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='normal'))
+            if db_card_def.image_data_large:
+                pydantic_deck_entry.card_definition.local_image_url_large = str(request.url_for('get_card_image_data', scryfall_id=db_card_def.scryfall_id, size='large'))
+        return pydantic_deck_entry
     except ValueError as e: # From crud if CardDefinition not found
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 

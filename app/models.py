@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON, LargeBinary
 from sqlalchemy.sql import func # For server-side default timestamp
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -32,6 +32,11 @@ class CardDefinition(Base): # Renamed from Card
     image_uri_large = Column(String, nullable=True)
     image_uri_art_crop = Column(String, nullable=True)
     image_uri_border_crop = Column(String, nullable=True)
+        # New columns for storing raw image data
+    image_data_small = Column(LargeBinary, nullable=True)
+    image_data_normal = Column(LargeBinary, nullable=True)
+    image_data_large = Column(LargeBinary, nullable=True)
+
     # color_identity = Column(String, nullable=True) # e.g., "W,U,B,R,G"
     # rarity = Column(String, nullable=True)
 

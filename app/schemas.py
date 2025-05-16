@@ -1,6 +1,6 @@
 # app/schemas.py
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict # Added List and Dict
+from typing import Optional, List, Dict # Ensure List and Dict are imported
 from datetime import datetime
 
 # --- Card Definition Schemas ---
@@ -12,11 +12,17 @@ class CardDefinitionBase(BaseModel):
     set_code: Optional[str] = None
     collector_number: Optional[str] = None
     legalities: Optional[Dict[str, str]] = None
+    type_line: Optional[str] = None # Added type_line
     image_uri_small: Optional[str] = None
     image_uri_normal: Optional[str] = None
     image_uri_large: Optional[str] = None
     image_uri_art_crop: Optional[str] = None
     image_uri_border_crop: Optional[str] = None
+    
+    # New fields for locally served image URLs
+    local_image_url_small: Optional[str] = None
+    local_image_url_normal: Optional[str] = None
+    local_image_url_large: Optional[str] = None
 
 class CardDefinitionCreate(CardDefinitionBase):
     scryfall_id: str # Mandatory for creation
