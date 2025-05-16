@@ -1,6 +1,6 @@
 # app/schemas.py
 from pydantic import BaseModel, Field
-from typing import Optional, List # Added List for consistency if used elsewhere, though not in this snippet
+from typing import Optional, List, Dict # Added List and Dict
 from datetime import datetime
 
 # --- Card Definition Schemas ---
@@ -11,6 +11,7 @@ class CardDefinitionBase(BaseModel):
     name: Optional[str] = None
     set_code: Optional[str] = None
     collector_number: Optional[str] = None
+    legalities: Optional[Dict[str, str]] = None
     # Add other Scryfall fields you might want to create/update if managing definitions directly
 
 class CardDefinitionCreate(CardDefinitionBase):
@@ -61,7 +62,6 @@ class UserCollectionEntry(UserCollectionEntryBase): # For returning a collection
     class Config:
         from_attributes = True
 
-
 # Schemas for User Authentication
 class UserBase(BaseModel):
     username: str
@@ -83,3 +83,48 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: Optional[str] = None
+
+# --- Deck Schemas ---
+class DeckEntryBase(BaseModel):
+    quantity: int = Field(default=1, ge=1)
+    is_commander: bool = False
+    is_sideboard: bool = False
+
+class DeckEntryCreate(DeckEntryBase):
+    card_definition_scryfall_id: str # To identify the card to add
+
+class DeckEntryUpdate(BaseModel):
+    quantity: Optional[int] = Field(default=None, ge=0) # Allow setting to 0 to remove, or handle removal separately
+    is_commander: Optional[bool] = None
+    is_sideboard: Optional[bool] = None
+
+class DeckEntry(DeckEntryBase): # For returning a deck entry
+    id: int
+    deck_id: int
+    card_definition: CardDefinition # Nested card definition details
+
+    class Config:
+        from_attributes = True
+
+class DeckBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    format: Optional[str] = None
+
+class DeckCreate(DeckBase):
+    pass
+
+class DeckUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    format: Optional[str] = None
+
+class Deck(DeckBase): # For returning a deck
+    id: int
+    user_id: int
+    date_created: datetime
+    date_updated: Optional[datetime] = None
+    deck_entries: List[DeckEntry] = [] # List of cards in the deck
+
+    class Config:
+        from_attributes = True

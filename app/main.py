@@ -92,8 +92,23 @@ async def create_new_card_definition(
     return await crud.create_card_definition(db=db, card_def=card_def)
 
 @app.get("/card-definitions/", response_model=List[schemas.CardDefinition])
-async def read_card_definitions_list(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
-    card_defs = await crud.get_card_definitions(db=db, skip=skip, limit=limit)
+async def read_card_definitions_list(
+    skip: int = 0,
+    limit: int = 100,
+    name: Optional[str] = None,
+    type_line: Optional[str] = None,
+    set_code: Optional[str] = None,
+    # Add other searchable fields as query parameters here
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve a list of card definitions.
+    Supports pagination and filtering by name, type_line, set_code, etc.
+    Providing a 'name' will list all printings of cards matching that name.
+    """
+    card_defs = await crud.get_card_definitions(
+        db=db, skip=skip, limit=limit, name=name, type_line=type_line, set_code=set_code
+    )
     return card_defs
 
 @app.get("/card-definitions/{card_def_id}", response_model=schemas.CardDefinition)
@@ -184,3 +199,89 @@ async def search_scryfall_cards(q: str, db: AsyncSession = Depends(get_db)): # A
     #     except httpx.RequestError as e:
     #         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Could not connect to Scryfall: {str(e)}")
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Scryfall proxy not fully implemented yet. Add httpx.")
+
+# --- Deck Management Endpoints ---
+@app.post("/decks/", response_model=schemas.Deck, status_code=status.HTTP_201_CREATED)
+async def create_new_deck_for_user(
+    deck_create: schemas.DeckCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Create a new deck for the authenticated user."""
+    deck = await crud.create_deck(db=db, user_id=current_user.id, deck_create=deck_create)
+    # The created deck will be empty initially, cards are added via another endpoint.
+    # To return deck_entries, ensure your Deck schema and CRUD operation populate it.
+    # For now, it will return the deck without entries as per current Deck schema.
+    # If you want to return entries, you might need to adjust the Deck schema or how crud.create_deck works.
+    # The current Deck schema expects deck_entries: List[DeckEntry] = []
+    return deck
+
+@app.get("/decks/", response_model=List[schemas.Deck])
+async def read_user_decks(
+    skip: int = 0, limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Retrieve decks for the authenticated user."""
+    decks = await crud.get_user_decks(db=db, user_id=current_user.id, skip=skip, limit=limit)
+    return decks
+
+@app.get("/decks/{deck_id}", response_model=schemas.Deck)
+async def read_single_deck(
+    deck_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Retrieve a specific deck owned by the authenticated user."""
+    deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id)
+    if deck is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
+    return deck
+
+@app.put("/decks/{deck_id}", response_model=schemas.Deck)
+async def update_existing_deck(
+    deck_id: int,
+    deck_update: schemas.DeckUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Update a deck's details (name, description, format)."""
+    db_deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id) # Ensure user owns the deck
+    if db_deck is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
+    return await crud.update_deck(db=db, db_deck=db_deck, deck_update=deck_update)
+
+@app.delete("/decks/{deck_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_existing_deck(
+    deck_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Delete a deck owned by the authenticated user."""
+    db_deck = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id)
+    if db_deck is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
+    await crud.delete_deck(db=db, db_deck=db_deck)
+    return None
+
+# --- Deck Card Management Endpoints ---
+@app.post("/decks/{deck_id}/cards/", response_model=schemas.DeckEntry, status_code=status.HTTP_201_CREATED)
+async def add_card_to_specific_deck(
+    deck_id: int,
+    deck_entry_create: schemas.DeckEntryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Add a card to a specific deck owned by the user."""
+    # First, verify the deck exists and belongs to the user
+    deck_model = await crud.get_deck(db=db, user_id=current_user.id, deck_id=deck_id) # Fetch the full deck model
+    if deck_model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deck not found or not owned by user")
+    try:
+        return await crud.add_card_to_deck(db=db, deck_model=deck_model, deck_entry_create=deck_entry_create)
+    except ValueError as e: # From crud if CardDefinition not found
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+# You would also add endpoints for:
+# - PUT /decks/{deck_id}/cards/{deck_entry_id} (Update card quantity/role in deck)
+# - DELETE /decks/{deck_id}/cards/{deck_entry_id} (Remove a card from a deck)

@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON
 from sqlalchemy.sql import func # For server-side default timestamp
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -15,6 +15,7 @@ class User(Base):
     date_joined = Column(DateTime(timezone=True), server_default=func.now())
 
     collection_entries = relationship("UserCollectionEntry", back_populates="owner")
+    decks = relationship("Deck", back_populates="owner")
 
 class CardDefinition(Base): # Renamed from Card
     __tablename__ = "card_definitions"
@@ -24,12 +25,13 @@ class CardDefinition(Base): # Renamed from Card
     name = Column(String, index=True)
     set_code = Column(String)
     collector_number = Column(String)
+    type_line = Column(String, index=True, nullable=True) # Added for searching by type
+    legalities = Column(JSON, nullable=True) # To store format legalities e.g. {"standard": "legal", "commander": "legal"}
     # Add other Scryfall-specific fields here if you want to cache them, e.g.:
     # image_uri_normal = Column(String, nullable=True)
     # image_uri_large = Column(String, nullable=True)
     # mana_cost = Column(String, nullable=True)
     # cmc = Column(Float, nullable=True)
-    # type_line = Column(String, nullable=True)
     # oracle_text = Column(String, nullable=True)
     # color_identity = Column(String, nullable=True) # e.g., "W,U,B,R,G"
     # rarity = Column(String, nullable=True)
@@ -38,9 +40,34 @@ class CardDefinition(Base): # Renamed from Card
     date_updated = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
     collection_entries = relationship("UserCollectionEntry", back_populates="card_definition")
+    deck_entries = relationship("DeckEntry", back_populates="card_definition")
 
-    def __repr__(self):
-        return f"<CardDefinition(name='{self.name}', scryfall_id='{self.scryfall_id}')>"
+class Deck(Base):
+    __tablename__ = "decks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False, index=True)
+    description = Column(String, nullable=True)
+    format = Column(String, nullable=True) # e.g., "Commander", "Standard", "Modern"
+    date_created = Column(DateTime(timezone=True), server_default=func.now())
+    date_updated = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+    owner = relationship("User", back_populates="decks")
+    deck_entries = relationship("DeckEntry", back_populates="deck", cascade="all, delete-orphan")
+
+class DeckEntry(Base):
+    __tablename__ = "deck_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deck_id = Column(Integer, ForeignKey("decks.id"), nullable=False)
+    card_definition_id = Column(Integer, ForeignKey("card_definitions.id"), nullable=False)
+    quantity = Column(Integer, default=1, nullable=False)
+    is_commander = Column(Boolean, default=False)
+    is_sideboard = Column(Boolean, default=False)
+
+    deck = relationship("Deck", back_populates="deck_entries")
+    card_definition = relationship("CardDefinition", back_populates="deck_entries")
 
 class UserCollectionEntry(Base):
     __tablename__ = "user_collection_entries"
