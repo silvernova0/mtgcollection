@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List # For list responses
+from typing import List, Optional  # <-- Make sure this is present
 from datetime import timedelta
 
 from . import models, schemas, crud, security # Import security

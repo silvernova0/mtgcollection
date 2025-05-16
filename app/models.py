@@ -27,12 +27,11 @@ class CardDefinition(Base): # Renamed from Card
     collector_number = Column(String)
     type_line = Column(String, index=True, nullable=True) # Added for searching by type
     legalities = Column(JSON, nullable=True) # To store format legalities e.g. {"standard": "legal", "commander": "legal"}
-    # Add other Scryfall-specific fields here if you want to cache them, e.g.:
-    # image_uri_normal = Column(String, nullable=True)
-    # image_uri_large = Column(String, nullable=True)
-    # mana_cost = Column(String, nullable=True)
-    # cmc = Column(Float, nullable=True)
-    # oracle_text = Column(String, nullable=True)
+    image_uri_small = Column(String, nullable=True)
+    image_uri_normal = Column(String, nullable=True)
+    image_uri_large = Column(String, nullable=True)
+    image_uri_art_crop = Column(String, nullable=True)
+    image_uri_border_crop = Column(String, nullable=True)
     # color_identity = Column(String, nullable=True) # e.g., "W,U,B,R,G"
     # rarity = Column(String, nullable=True)
 

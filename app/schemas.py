@@ -12,7 +12,11 @@ class CardDefinitionBase(BaseModel):
     set_code: Optional[str] = None
     collector_number: Optional[str] = None
     legalities: Optional[Dict[str, str]] = None
-    # Add other Scryfall fields you might want to create/update if managing definitions directly
+    image_uri_small: Optional[str] = None
+    image_uri_normal: Optional[str] = None
+    image_uri_large: Optional[str] = None
+    image_uri_art_crop: Optional[str] = None
+    image_uri_border_crop: Optional[str] = None
 
 class CardDefinitionCreate(CardDefinitionBase):
     scryfall_id: str # Mandatory for creation

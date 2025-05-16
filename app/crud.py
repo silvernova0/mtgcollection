@@ -6,8 +6,7 @@ from sqlalchemy.sql import func # For now() in update
 from typing import Optional, List, Dict, Any # Import Dict, Any for update_card if needed, though not directly used in this snippet
 from . import models, schemas
 from .security import get_password_hash
-# Potentially import httpx here if you put the helper in this file
-# import httpx
+import httpx # Moved import to top level
 
 async def _fetch_and_store_card_definition_from_scryfall(db: AsyncSession, scryfall_id: str) -> Optional[models.CardDefinition]:
     """
@@ -15,8 +14,6 @@ async def _fetch_and_store_card_definition_from_scryfall(db: AsyncSession, scryf
     and returns the SQLAlchemy model instance.
     Returns None if the card is not found on Scryfall or an error occurs.
     """
-    import httpx # Keep imports at the top of the file in practice for modules
-
     scryfall_api_url = f"https://api.scryfall.com/cards/{scryfall_id}"
     try:
         async with httpx.AsyncClient() as client:
@@ -24,12 +21,19 @@ async def _fetch_and_store_card_definition_from_scryfall(db: AsyncSession, scryf
             response.raise_for_status() # Raises an exception for 4XX/5XX responses
             scryfall_data = response.json()
 
+            image_uris = scryfall_data.get("image_uris", {})
+
             card_def_create_data = schemas.CardDefinitionCreate(
                 scryfall_id=scryfall_data.get("id"),
                 name=scryfall_data.get("name"),
                 set_code=scryfall_data.get("set"),
                 collector_number=scryfall_data.get("collector_number"),
                 legalities=scryfall_data.get("legalities"),
+                image_uri_small=image_uris.get("small"),
+                image_uri_normal=image_uris.get("normal"),
+                image_uri_large=image_uris.get("large"),
+                image_uri_art_crop=image_uris.get("art_crop"),
+                image_uri_border_crop=image_uris.get("border_crop"),
                 # type_line=scryfall_data.get("type_line"), # Ensure this is in your CardDefinitionCreate if you uncomment
             )
             

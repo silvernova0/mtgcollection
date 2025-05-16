@@ -1,6 +1,5 @@
 # scripts/populate_cards.py
 import asyncio
-import httpx
 import json
 import sys
 import os
@@ -8,6 +7,8 @@ import os
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
+
+import httpx # Moved import to top level
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +47,8 @@ async def process_card_data(db: AsyncSession, card_data: dict):
         # print(f"Card {scryfall_id} ({card_data.get('name')}) already exists. Skipping.")
         return 
 
+    image_uris = card_data.get("image_uris", {})
+
     # Map Scryfall data to your CardDefinitionCreate schema
     card_def_create = CardDefinitionCreate(
         scryfall_id=scryfall_id,
@@ -53,6 +56,11 @@ async def process_card_data(db: AsyncSession, card_data: dict):
         set_code=card_data.get("set"), # For "all_cards" bulk file
         collector_number=card_data.get("collector_number"), # For "all_cards"
         legalities=card_data.get("legalities"),
+        image_uri_small=image_uris.get("small"),
+        image_uri_normal=image_uris.get("normal"),
+        image_uri_large=image_uris.get("large"),
+        image_uri_art_crop=image_uris.get("art_crop"),
+        image_uri_border_crop=image_uris.get("border_crop"),
         # type_line=card_data.get("type_line"), # Ensure this is in your schema
         # Add other fields you want to store
     )
@@ -87,16 +95,42 @@ async def main_populate():
 
     print(f"Downloaded {len(all_cards_data)} card objects.")
 
+    # Ensure database tables are created if not already (idempotent)
+    async with engine.begin() as conn:
+            # await conn.run_sync(CardDefinitionModel.__table__.drop) # CAUTION: Drops the table!
+        await conn.run_sync(Base.metadata.create_all)
+            # await conn.commit() # Ensure the drop is committed if you use it
+    print("Database tables ensured.")
+
     async with AsyncSessionLocal() as session:
         try:
-            for i, card_data in enumerate(all_cards_data):
-                await process_card_data(session, card_data)
-                if (i + 1) % 1000 == 0: # Commit in batches
-                    print(f"Processed {i+1} cards, committing batch...")
+            concurrency_factor = 50  # Number of cards to process concurrently
+            commit_batch_size = 1000 # Number of cards processed before a DB commit
+            
+            processed_count_since_last_commit = 0
+
+            for i in range(0, len(all_cards_data), concurrency_factor):
+                batch_card_data = all_cards_data[i:i + concurrency_factor]
+                tasks = [process_card_data(session, card_data) for card_data in batch_card_data]
+                
+                # Process a batch of cards concurrently
+                await asyncio.gather(*tasks)
+                
+                processed_count_in_batch = len(batch_card_data)
+                processed_count_since_last_commit += processed_count_in_batch
+                total_processed = i + processed_count_in_batch
+                print(f"Processed batch of {processed_count_in_batch} cards. Total processed: {total_processed}/{len(all_cards_data)}")
+
+                if processed_count_since_last_commit >= commit_batch_size:
+                    print(f"Committing batch of {processed_count_since_last_commit} processed card records...")
                     await session.commit()
                     print("Batch committed.")
-            await session.commit() # Commit any remaining
-            print("Final commit complete.")
+                    processed_count_since_last_commit = 0
+            
+            if processed_count_since_last_commit > 0: # Commit any remaining cards
+                print(f"Committing final {processed_count_since_last_commit} processed card records...")
+                await session.commit()
+                print("Final commit complete.")
         except Exception as e:
             print(f"An error occurred during bulk processing: {e}")
             await session.rollback()
