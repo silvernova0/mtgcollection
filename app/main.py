@@ -1,5 +1,5 @@
 # app/main.py
-from fastapi import FastAPI, Depends, HTTPException, status, Query, Request # Import Query and Request
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Request, Path # Import Query, Request, and Path
 from fastapi.middleware.cors import CORSMiddleware # Import CORSMiddleware
 from fastapi.responses import Response # Added for serving image data
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -209,7 +209,7 @@ class StoredImageSize(str, Enum):
     large = "large"
 
 @app.get(
-    "/cards/{scryfall_id}/image",
+    "/cards/{scryfall_id}/image/{size}", # MODIFIED: size is now a path parameter
     responses={
         200: {
             "content": {"image/jpeg": {}}, # Assuming images are JPEGs
@@ -226,13 +226,14 @@ class StoredImageSize(str, Enum):
     name="get_card_image_data"  # <--- ADD THIS NAME
 )
 async def get_card_image_data(
-    scryfall_id: str,
-    size: StoredImageSize = Query(
-        StoredImageSize.normal, # Default size
+    scryfall_id: str = Path(..., description="The Scryfall ID of the card."), # ADDED: Path for scryfall_id
+    size: StoredImageSize = Path( # MODIFIED: size is now a Path parameter
+        ..., # Make size a required path parameter
         description="The desired image size (small, normal, or large)."
     ),
     db: AsyncSession = Depends(get_db),
 ):
+
     card = await crud.get_card_definition_by_scryfall_id(db, scryfall_id=scryfall_id)
     if not card:
         raise HTTPException(status_code=404, detail="Card not found")

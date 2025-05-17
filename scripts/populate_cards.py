@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # For simplicity, assuming you can get a db session and access CRUD
 from app.database import AsyncSessionLocal, Base, engine # Adjust imports as needed
 from app.models import CardDefinition as CardDefinitionModel # Alias to avoid confusion
-# from app.schemas import CardDefinitionCreate # No longer using this directly for model creation in script
-from app.crud import get_card_definition_by_scryfall_id, create_card_definition
+from app.crud import get_card_definition_by_scryfall_id # create_card_definition no longer used directly here
 
 # URL for a Scryfall bulk data file (e.g., Oracle Cards or All Cards)
 # Get the latest download URI from https://api.scryfall.com/bulk-data
@@ -41,88 +40,112 @@ async def process_card_data(db: AsyncSession, card_data: dict, image_client: htt
         print(f"Skipping card with missing Scryfall ID: {card_data.get('name')}")
         return
 
-    existing_card_def = await get_card_definition_by_scryfall_id(db, scryfall_id)
-    if existing_card_def:
-        # Optionally, you could implement update logic here if the Scryfall data is newer
-        # print(f"Card {scryfall_id} ({card_data.get('name')}) already exists. Skipping.")
-        return 
+    card_name_from_bulk = card_data.get("name")
+    if not card_name_from_bulk:
+        print(f"Skipping card {scryfall_id} due to missing name in bulk data.")
+        return
+
+    card_to_process: CardDefinitionModel | None = await get_card_definition_by_scryfall_id(db, scryfall_id)
+    is_new_card = False
 
     image_uris = card_data.get("image_uris", {})
 
-    card_model_data = {
-        "scryfall_id": scryfall_id,
-        "name": card_data.get("name"),
-        "set_code": card_data.get("set"),
-        "collector_number": card_data.get("collector_number"),
-        "legalities": card_data.get("legalities"),
-        "type_line": card_data.get("type_line"),
-        "image_uri_small": image_uris.get("small"),
-        "image_uri_normal": image_uris.get("normal"),
-        "image_uri_large": image_uris.get("large"),
-        "image_uri_art_crop": image_uris.get("art_crop"),
-        "image_uri_border_crop": image_uris.get("border_crop"),
-        # Initialize new image data fields
-        "image_data_small": None,
-        "image_data_normal": None,
-        "image_data_large": None,
-    }
+    if card_to_process:
+        print(f"Card {scryfall_id} ({card_name_from_bulk}) already exists. Checking for updates...")
+        # Update existing card's attributes
+        card_to_process.name = card_name_from_bulk
+        card_to_process.set_code = card_data.get("set")
+        card_to_process.collector_number = card_data.get("collector_number")
+        card_to_process.legalities = card_data.get("legalities")
+        card_to_process.type_line = card_data.get("type_line")
+        
+        card_to_process.image_uri_small = image_uris.get("small")
+        card_to_process.image_uri_normal = image_uris.get("normal")
+        card_to_process.image_uri_large = image_uris.get("large")
+        card_to_process.image_uri_art_crop = image_uris.get("art_crop")
+        card_to_process.image_uri_border_crop = image_uris.get("border_crop")
+        # SQLAlchemy's onupdate mechanism should handle 'date_updated'
 
-    # Validate mandatory fields before creation
-    if not card_model_data["name"]: # scryfall_id already checked
-        print(f"Skipping card {scryfall_id} due to missing name.")
-        return
-    
-        # Download image data
-    if card_model_data["image_uri_small"]:
+    else: # Card does not exist, create a new one
+        print(f"Card {scryfall_id} ({card_name_from_bulk}) not found. Creating new record...")
+        is_new_card = True
+        
+        card_model_data_for_new = {
+            "scryfall_id": scryfall_id,
+            "name": card_name_from_bulk,
+            "set_code": card_data.get("set"),
+            "collector_number": card_data.get("collector_number"),
+            "legalities": card_data.get("legalities"),
+            "type_line": card_data.get("type_line"),
+            "image_uri_small": image_uris.get("small"),
+            "image_uri_normal": image_uris.get("normal"),
+            "image_uri_large": image_uris.get("large"),
+            "image_uri_art_crop": image_uris.get("art_crop"),
+            "image_uri_border_crop": image_uris.get("border_crop"),
+            "image_data_small": None,
+            "image_data_normal": None,
+            "image_data_large": None,
+        }
         try:
-            print(f"Attempting to download small image for {card_model_data['name']} from {card_model_data['image_uri_small']}")
-            response = await image_client.get(card_model_data["image_uri_small"])
-            response.raise_for_status()
-            card_model_data["image_data_small"] = response.content
-            print(f"Successfully downloaded small image for {card_model_data['name']} ({len(response.content)} bytes)")
-        except httpx.HTTPStatusError as e:
-            print(f"HTTP Error downloading small image for {scryfall_id} ({card_model_data['name']}): {e.response.status_code} - {e.request.url}")
+            card_to_process = CardDefinitionModel(**card_model_data_for_new)
         except Exception as e:
-            print(f"Generic Error downloading small image for {scryfall_id} ({card_model_data['name']}): {e}")
-            card_model_data["image_uri_small"] = None # Nullify URI if download fails
+            print(f"Error instantiating CardDefinitionModel for new card {scryfall_id} ({card_name_from_bulk}): {e}")
+            return
 
-    if card_model_data["image_uri_normal"]:
+    # Download image data if URI exists and corresponding image_data field is None
+    if card_to_process.image_uri_small and not card_to_process.image_data_small:
         try:
-            print(f"Attempting to download normal image for {card_model_data['name']} from {card_model_data['image_uri_normal']}")
-            response = await image_client.get(card_model_data["image_uri_normal"])
+            print(f"Attempting to download small image for {card_to_process.name} from {card_to_process.image_uri_small}")
+            response = await image_client.get(card_to_process.image_uri_small)
             response.raise_for_status()
-            card_model_data["image_data_normal"] = response.content
-            print(f"Successfully downloaded normal image for {card_model_data['name']} ({len(response.content)} bytes)")
+            card_to_process.image_data_small = response.content
+            print(f"Successfully downloaded small image for {card_to_process.name} ({len(response.content)} bytes)")
         except httpx.HTTPStatusError as e:
-            print(f"HTTP Error downloading normal image for {scryfall_id} ({card_model_data['name']}): {e.response.status_code} - {e.request.url}")
+            print(f"HTTP Error downloading small image for {scryfall_id} ({card_to_process.name}): {e.response.status_code} - {e.request.url}")
+            card_to_process.image_uri_small = None
+            card_to_process.image_data_small = None
         except Exception as e:
-            print(f"Generic Error downloading normal image for {scryfall_id} ({card_model_data['name']}): {e}")
-            card_model_data["image_uri_normal"] = None
+            print(f"Generic Error downloading small image for {scryfall_id} ({card_to_process.name}): {e}")
+            card_to_process.image_uri_small = None
+            card_to_process.image_data_small = None
 
-    if card_model_data["image_uri_large"]:
+    if card_to_process.image_uri_normal and not card_to_process.image_data_normal:
         try:
-            print(f"Attempting to download large image for {card_model_data['name']} from {card_model_data['image_uri_large']}")
-            response = await image_client.get(card_model_data["image_uri_large"])
+            print(f"Attempting to download normal image for {card_to_process.name} from {card_to_process.image_uri_normal}")
+            response = await image_client.get(card_to_process.image_uri_normal)
             response.raise_for_status()
-            card_model_data["image_data_large"] = response.content
-            print(f"Successfully downloaded large image for {card_model_data['name']} ({len(response.content)} bytes)")
+            card_to_process.image_data_normal = response.content
+            print(f"Successfully downloaded normal image for {card_to_process.name} ({len(response.content)} bytes)")
         except httpx.HTTPStatusError as e:
-            print(f"HTTP Error downloading large image for {scryfall_id} ({card_model_data['name']}): {e.response.status_code} - {e.request.url}")
+            print(f"HTTP Error downloading normal image for {scryfall_id} ({card_to_process.name}): {e.response.status_code} - {e.request.url}")
+            card_to_process.image_uri_normal = None
+            card_to_process.image_data_normal = None
         except Exception as e:
-            print(f"Generic Error downloading large image for {scryfall_id} ({card_model_data['name']}): {e}")
-            card_model_data["image_uri_large"] = None
+            print(f"Generic Error downloading normal image for {scryfall_id} ({card_to_process.name}): {e}")
+            card_to_process.image_uri_normal = None
+            card_to_process.image_data_normal = None
 
+    if card_to_process.image_uri_large and not card_to_process.image_data_large:
+        try:
+            print(f"Attempting to download large image for {card_to_process.name} from {card_to_process.image_uri_large}")
+            response = await image_client.get(card_to_process.image_uri_large)
+            response.raise_for_status()
+            card_to_process.image_data_large = response.content
+            print(f"Successfully downloaded large image for {card_to_process.name} ({len(response.content)} bytes)")
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP Error downloading large image for {scryfall_id} ({card_to_process.name}): {e.response.status_code} - {e.request.url}")
+            card_to_process.image_uri_large = None
+            card_to_process.image_data_large = None
+        except Exception as e:
+            print(f"Generic Error downloading large image for {scryfall_id} ({card_to_process.name}): {e}")
+            card_to_process.image_uri_large = None
+            card_to_process.image_data_large = None
 
-    try:
-        # Create the SQLAlchemy model instance directly
-        db_card_def = CardDefinitionModel(**card_model_data)
-        db.add(db_card_def)
-        # The actual db.flush() and db.commit() will be handled by main_populate in batches
-        # print(f"Prepared for DB: {card_model_data['name']} ({scryfall_id})")
-
-    except Exception as e:
-        print(f"Error creating CardDefinitionModel for {scryfall_id} ({card_model_data['name']}): {e}")
-        # Potentially rollback this specific card or log for later, depending on transaction strategy
+    if is_new_card and card_to_process:
+        try:
+            db.add(card_to_process)
+        except Exception as e:
+            print(f"Error adding new card {card_to_process.name} ({scryfall_id}) to session: {e}")
 
 async def main_populate():
     # Initialize DB (if needed for a standalone script, or ensure tables exist)
@@ -159,20 +182,33 @@ async def main_populate():
                 processed_count_since_last_commit = 0
 
                 for i in range(0, len(all_cards_data), concurrency_factor):
-                    batch_card_data = all_cards_data[i:i + concurrency_factor]
-                    # Pass the image_download_client to process_card_data
-                    tasks = [process_card_data(session, card_data, image_download_client) for card_data in batch_card_data]
+                    current_batch_all_cards = all_cards_data[i:i + concurrency_factor]
+                    
+                    # Filter this batch for "Lightning Bolt" cards
+                    lightning_bolt_batch = [
+                        card_data for card_data in current_batch_all_cards
+                        if card_data.get("name") == "Lightning Bolt"
+                    ]
+
+                    total_scanned_so_far = i + len(current_batch_all_cards)
+
+                    if not lightning_bolt_batch:
+                        print(f"Scanned batch up to card {total_scanned_so_far}/{len(all_cards_data)}. No 'Lightning Bolt' found in this specific segment.")
+                        continue # Move to the next segment of the bulk data
+
+                    print(f"Found {len(lightning_bolt_batch)} 'Lightning Bolt' card(s) in current batch segment. Processing them...")
+                    # Pass the image_download_client and only the filtered Lightning Bolt cards
+                    tasks = [process_card_data(session, card_data, image_download_client) for card_data in lightning_bolt_batch]
                     
                     # Process a batch of cards concurrently
                     await asyncio.gather(*tasks)
                     
-                    processed_count_in_batch = len(batch_card_data)
+                    processed_count_in_batch = len(lightning_bolt_batch) # Number of Lightning Bolts processed
                     processed_count_since_last_commit += processed_count_in_batch
-                    total_processed = i + processed_count_in_batch
-                    print(f"Processed batch of {processed_count_in_batch} cards. Total processed: {total_processed}/{len(all_cards_data)}")
+                    print(f"Processed {processed_count_in_batch} 'Lightning Bolt' card(s). Total cards scanned from bulk: {total_scanned_so_far}/{len(all_cards_data)}")
 
                     if processed_count_since_last_commit >= commit_batch_size:
-                        print(f"Committing batch of {processed_count_since_last_commit} processed card records...")
+                        print(f"Committing {processed_count_since_last_commit} 'Lightning Bolt' records...")
                         await session.commit()
                         print("Batch committed.")
                         processed_count_since_last_commit = 0
@@ -181,7 +217,7 @@ async def main_populate():
                 # but the 'finally' block for session.close() is not strictly needed
                 # due to the 'async with AsyncSessionLocal() as session:' context manager.
                 if processed_count_since_last_commit > 0: # Commit any remaining cards
-                    print(f"Committing final {processed_count_since_last_commit} processed card records...")
+                    print(f"Committing final {processed_count_since_last_commit} 'Lightning Bolt' records...")
                     await session.commit()
                     print("Final commit complete.")
             except Exception as e:

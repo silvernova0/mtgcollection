@@ -4,6 +4,7 @@ from sqlalchemy.future import select # For SQLAlchemy 2.0 style select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import func # For now() in update
 from typing import Optional, List, Dict, Any # Import Dict, Any for update_card if needed, though not directly used in this snippet
+import asyncio # For potential concurrent image downloads
 from . import models, schemas
 from .security import get_password_hash
 import httpx # Moved import to top level
@@ -11,39 +12,77 @@ import httpx # Moved import to top level
 async def _fetch_and_store_card_definition_from_scryfall(db: AsyncSession, scryfall_id: str) -> Optional[models.CardDefinition]:
     """
     Fetches card data from Scryfall API by Scryfall ID, stores it as a CardDefinition,
-    and returns the SQLAlchemy model instance.
+    and returns the SQLAlchemy model instance. Includes on-the-fly image downloading.
     Returns None if the card is not found on Scryfall or an error occurs.
     """
+    # Helper for on-the-fly image download
+    # Renamed to avoid potential conflict if this helper is moved out or reused.
+
+    async def download_image_data_internal(client: httpx.AsyncClient, url: Optional[str]) -> Optional[bytes]:
+        if not url:
+            return None
+        try:
+            # Simplified download, no complex retries like in populate_cards.py for this on-the-fly fetch
+            img_response = await client.get(url, timeout=10) # Shorter timeout for on-the-fly
+            img_response.raise_for_status()
+            return img_response.content
+        except Exception as img_e:
+            print(f"Failed to download image on-the-fly from {url}: {img_e}")
+            return None
+
     scryfall_api_url = f"https://api.scryfall.com/cards/{scryfall_id}"
+    # print(f"Attempting to fetch from Scryfall: {scryfall_api_url}") # For debugging
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(scryfall_api_url)
             response.raise_for_status() # Raises an exception for 4XX/5XX responses
             scryfall_data = response.json()
-
             image_uris = scryfall_data.get("image_uris", {})
 
-            card_def_create_data = schemas.CardDefinitionCreate(
-                scryfall_id=scryfall_data.get("id"),
-                name=scryfall_data.get("name"),
-                set_code=scryfall_data.get("set"),
-                collector_number=scryfall_data.get("collector_number"),
-                legalities=scryfall_data.get("legalities"),
-                image_uri_small=image_uris.get("small"),
-                image_uri_normal=image_uris.get("normal"),
-                image_uri_large=image_uris.get("large"),
-                image_uri_art_crop=image_uris.get("art_crop"),
-                image_uri_border_crop=image_uris.get("border_crop"),
-                type_line=scryfall_data.get("type_line"),
-            )
+            # Directly prepare data for the model, including image_data fields
+            card_def_model_data = {
+                "scryfall_id": scryfall_data.get("id"),
+                "name": scryfall_data.get("name"),
+                "set_code": scryfall_data.get("set"),
+                "collector_number": scryfall_data.get("collector_number"),
+                "legalities": scryfall_data.get("legalities"),
+                "image_uri_small": image_uris.get("small"),
+                "image_uri_normal": image_uris.get("normal"),
+                "image_uri_large": image_uris.get("large"),
+                "image_uri_art_crop": image_uris.get("art_crop"),
+                "image_uri_border_crop": image_uris.get("border_crop"),
+                "type_line": scryfall_data.get("type_line"),
+                "image_data_small": None, # Initialize
+                "image_data_normal": None,
+                "image_data_large": None,
+            }
             
-            if not card_def_create_data.scryfall_id or not card_def_create_data.name:
+            if not card_def_model_data["scryfall_id"] or not card_def_model_data["name"]:
+                print(f"Scryfall data for {scryfall_id} missing essential fields (id or name). Will not store.")
                 return None
 
-            return await create_card_definition(db, card_def_create_data)
+            # Attempt to download images on-the-fly
+            if card_def_model_data["image_uri_small"]:
+                card_def_model_data["image_data_small"] = await download_image_data_internal(client, card_def_model_data["image_uri_small"])
+            if card_def_model_data["image_uri_normal"]:
+                card_def_model_data["image_data_normal"] = await download_image_data_internal(client, card_def_model_data["image_uri_normal"]) # Corrected typo
+            if card_def_model_data["image_uri_large"]: # Ensure large image download is attempted
+                card_def_model_data["image_data_large"] = await download_image_data_internal(client, card_def_model_data["image_uri_large"])
+
+            db_card_def = models.CardDefinition(**card_def_model_data)
+            db.add(db_card_def)
+            await db.flush()
+            await db.refresh(db_card_def)
+            print(f"Successfully fetched and stored CardDefinition for {scryfall_id} ('{card_def_model_data['name']}') from Scryfall.")
+            return db_card_def
 
     except httpx.HTTPStatusError as e:
-        print(f"Scryfall API error for {scryfall_id}: {e}")
+        # Log more details from the HTTPStatusError
+        error_detail = f"status_code={e.response.status_code}"
+        if e.request:
+            error_detail += f", url={e.request.url}"
+        print(f"Scryfall API error for {scryfall_id}: {error_detail}. Response: {e.response.text[:200] if e.response else 'N/A'}")
         return None
     except httpx.RequestError as e:
         print(f"Request error for Scryfall API {scryfall_id}: {e}")
@@ -154,23 +193,44 @@ async def add_card_to_collection(db: AsyncSession, user_id: int, entry_create: s
         if not card_def:
             raise ValueError(f"Could not find or fetch CardDefinition with Scryfall ID {entry_create.card_definition_scryfall_id} from Scryfall.")
 
-    # 2. Check if user already has this card (by card_definition_id) to update quantity, or create new entry
-    # This example creates a new entry each time, or you can implement logic to update existing.
-    # For simplicity, we'll create a new entry. You might want to find an existing entry for the same card_definition_id
-    # and update quantities if it exists.
-
-    db_collection_entry = models.UserCollectionEntry(
-        user_id=user_id,
+    # 2. Check if an entry for this card already exists for the user
+    stmt = select(models.UserCollectionEntry).filter_by(
+        user_id=user_id, 
         card_definition_id=card_def.id,
-        **entry_create.model_dump(exclude={"card_definition_scryfall_id"}) # Exclude the scryfall_id used for lookup
+        # You might also want to filter by condition, language if you treat these as distinct entries
+        # For this example, we assume same card_definition_id means it's the same conceptual entry.
     )
-    db.add(db_collection_entry)
+    result = await db.execute(stmt)
+    db_collection_entry = result.scalars().first()
+
+    if db_collection_entry:
+        # Update existing entry
+        update_data = entry_create.model_dump(exclude={"card_definition_scryfall_id"}, exclude_unset=True)
+        if 'quantity_normal' in update_data:
+            db_collection_entry.quantity_normal += update_data['quantity_normal'] # Increment
+        if 'quantity_foil' in update_data:
+            db_collection_entry.quantity_foil += update_data['quantity_foil'] # Increment
+        
+        # For other fields, you might want to overwrite or have specific logic
+        if 'condition' in update_data: db_collection_entry.condition = update_data['condition']
+        if 'language' in update_data: db_collection_entry.language = update_data['language']
+        if 'notes' in update_data: db_collection_entry.notes = update_data['notes']
+        
+        db_collection_entry.date_updated_in_collection = func.now() # Explicitly set update timestamp
+    else:
+        # Create new entry
+        db_collection_entry = models.UserCollectionEntry(
+            user_id=user_id,
+            card_definition_id=card_def.id,
+            **entry_create.model_dump(exclude={"card_definition_scryfall_id"})
+        )
+        db.add(db_collection_entry)
+
     await db.flush()
     await db.refresh(db_collection_entry)
     # To include card_definition in the response, load it after refresh if not already loaded by relationship
     await db.refresh(db_collection_entry, attribute_names=['card_definition'])
     return db_collection_entry
-
 async def update_collection_entry(db: AsyncSession, db_collection_entry: models.UserCollectionEntry, entry_update: schemas.UserCollectionEntryUpdate) -> models.UserCollectionEntry:
     """
     Update an existing UserCollectionEntry.
@@ -262,15 +322,30 @@ async def add_card_to_deck(db: AsyncSession, deck_model: models.Deck, deck_entry
         if card_legality_in_format != "legal":
             raise ValueError(f"Card '{card_def.name}' is not legal in the '{deck_model.format}' format (Status: {card_legality_in_format or 'unknown'}).")
 
-    # Check if this card already exists in the deck to avoid duplicate DeckEntry rows for the same card.
-    # If it exists, you might want to update its quantity instead, or your design might allow multiple distinct entries.
-    # For simplicity here, we create a new entry.
-    db_deck_entry = models.DeckEntry(
+    # Check if this card (with the same sideboard status) already exists in the deck.
+    stmt = select(models.DeckEntry).filter_by(
         deck_id=deck_model.id,
         card_definition_id=card_def.id,
-        **deck_entry_create.model_dump(exclude={"card_definition_scryfall_id"})
+        is_sideboard=deck_entry_create.is_sideboard 
+        # is_commander might also be part of the uniqueness if a card can be both commander and in the 99 (though unusual)
     )
-    db.add(db_deck_entry)
+    result = await db.execute(stmt)
+    db_deck_entry = result.scalars().first()
+
+    if db_deck_entry:
+        # Update quantity of existing entry
+        db_deck_entry.quantity += deck_entry_create.quantity
+        # Potentially update is_commander if that's being changed for an existing entry
+        if deck_entry_create.is_commander is not None: # Check if it's explicitly passed
+             db_deck_entry.is_commander = deck_entry_create.is_commander
+    else:
+        # Create new entry
+        db_deck_entry = models.DeckEntry(
+            deck_id=deck_model.id,
+            card_definition_id=card_def.id,
+            **deck_entry_create.model_dump(exclude={"card_definition_scryfall_id"})
+        )
+        db.add(db_deck_entry)
     await db.flush()
     await db.refresh(db_deck_entry)
     await db.refresh(db_deck_entry, attribute_names=['card_definition']) # Ensure card_definition is loaded

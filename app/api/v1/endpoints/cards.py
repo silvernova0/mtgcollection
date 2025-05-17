@@ -1,12 +1,18 @@
 # Suggested location: app/api/v1/endpoints/cards.py
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.responses import Response # For serving binary image data
 from enum import Enum
 
 # Adjust these imports based on your project structure
 from app import crud
+from app.models import CardDefinition as CardDefinitionModel # For direct model access if needed, though CRUD is used
 from app.database import get_db # Your dependency to get the database session
+
+# Optional: For more advanced image verification/MIME type detection
+# import io
+# from PIL import Image
+# PIL_AVAILABLE = True # You'd set this based on Pillow installation
 
 router = APIRouter()
 
@@ -20,11 +26,11 @@ class StoredImageSize(str, Enum):
     large = "large"
 
 @router.get(
-    "/cards/{scryfall_id}/image",
+    "/cards/{scryfall_id}/image/{size}", # Changed: size is now a path parameter
     responses={
         200: {
-            "content": {"image/jpeg": {}}, # Assuming images are JPEGs
-            "description": "The card image.",
+            "content": {"image/jpeg": {}, "image/png": {}}, # More descriptive content types
+            "description": "The card image in the specified size.",
         },
         404: {"description": "Card or image data not found"},
         400: {"description": "Invalid image size requested"},
@@ -32,12 +38,12 @@ class StoredImageSize(str, Enum):
     summary="Get Card Image Data",
     description="Serves the stored binary image data for a card. "
                 "Currently supports 'small', 'normal', and 'large' sizes "
-                "and assumes JPEG format.",
+                "and typically serves JPEG format.",
 )
 async def get_card_image_data(
-    scryfall_id: str,
-    size: StoredImageSize = Query(
-        StoredImageSize.normal,
+    scryfall_id: str = Path(..., description="The Scryfall ID of the card."),
+    size: StoredImageSize = Path(
+        ..., # Made 'size' a required path parameter
         description="The desired image size (small, normal, or large)."
     ),
     db: AsyncSession = Depends(get_db),
@@ -46,6 +52,12 @@ async def get_card_image_data(
     Retrieves and serves the binary image data for a specific card and size.
     """
     card = await crud.get_card_definition_by_scryfall_id(db, scryfall_id=scryfall_id)
+    # The example used:
+    # stmt = select(CardDefinitionModel).where(CardDefinitionModel.scryfall_id == scryfall_id)
+    # result = await db.execute(stmt)
+    # card = result.scalars().first()
+    # Your CRUD method is fine.
+
     if not card:
         raise HTTPException(status_code=404, detail="Card not found")
 
@@ -72,8 +84,22 @@ async def get_card_image_data(
             detail=f"Image data for size '{size.value}' not found for card {scryfall_id}."
         )
 
-    # Scryfall images are typically JPEGs.
-    # If you store other formats, you might need to store the MIME type
-    # or infer it.
-    return Response(content=image_data, media_type="image/jpeg")
+    media_type = "image/jpeg" # Default assumption
 
+    # Optional: Dynamic MIME type detection using Pillow (if installed and image_data is valid)
+    # if PIL_AVAILABLE and image_data:
+    #     try:
+    #         pil_img = Image.open(io.BytesIO(image_data))
+    #         detected_mime = Image.MIME.get(pil_img.format)
+    #         if detected_mime:
+    #             media_type = detected_mime
+    #         else:
+    #             # Fallback if Pillow format isn't in its MIME dictionary
+    #             media_type = "application/octet-stream"
+    #         # print(f"Pillow detected format: {pil_img.format}, MIME: {media_type} for {scryfall_id} size {size.value}")
+    #     except Exception as e:
+    #         # print(f"Could not determine MIME type with Pillow for {scryfall_id} size {size.value}: {e}")
+    #         # Keep default media_type or use "application/octet-stream" as a generic fallback
+    #         pass # Keep default media_type
+
+    return Response(content=image_data, media_type=media_type)
